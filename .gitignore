@@ -17,3 +17,7 @@ __pycache__/
 
 # Ansible collections - installed via: ansible-galaxy collection install -r requirements.yml
 collections/
+
+# Local-only oneshot/spec prompts, not meant to be synced to git
+ONESHOT_PROMPT.md
+PROMPT.md

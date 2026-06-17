@@ -1,5 +1,5 @@
-# Migration parameters. Override vip_names with -e or your own vars file, e.g.:
-#   ansible-playbook playbooks/migrate_vips.yml -e '@vars/my_vips.yml'
+# Migration parameters. Edit this file directly for each migration run -
+# see README.md "How to run it" for the exact commands per phase.
 source_partition: Sample_01
 dest_partition: move-partition
 
@@ -14,16 +14,16 @@ vip_names:
 # Staging pools/members/monitors/profiles in dest_partition is
 # non-destructive and safe to re-run. The virtual server itself can't be
 # staged the same way: its destination IP is also unique device-wide, so it
-# can't exist in both partitions at once. Set this to true (or pass
-# -e cutover_virtual_servers=true) once you've validated the staged objects
-# and are ready for the brief remove-then-recreate cutover of the VS itself.
+# can't exist in both partitions at once. Set this to true once you've
+# validated the staged objects and are ready for the brief
+# remove-then-recreate cutover of the VS itself.
 cutover_virtual_servers: false
 
-# After the cutover above has run, set this to true (or pass
-# -e remove_source_after_migration=true) to also delete the now-unused
-# pools/members/monitors/profiles left behind in source_partition. Has no
-# effect unless cutover_virtual_servers is also true. Defaults to false so
-# migrations are non-destructive until explicitly confirmed.
+# After the cutover above has run, set this to true to also delete the
+# now-unused pools/members/monitors/profiles left behind in
+# source_partition. Has no effect unless cutover_virtual_servers is also
+# true. Defaults to false so migrations are non-destructive until
+# explicitly confirmed.
 remove_source_after_migration: false
 
 # Built-in/system profiles and monitors are shared platform objects that live

@@ -65,6 +65,14 @@ BIG-IP enforces two different uniqueness constraints that are device-wide
 
 ## How to run it
 
+First time only: copy [`.env.example`](.env.example) to `.env` and fill in
+your real F5 host/credentials (`.env` is gitignored, never committed).
+
+```bash
+cp .env.example .env
+$EDITOR .env
+```
+
 Every run starts the same way:
 
 ```bash

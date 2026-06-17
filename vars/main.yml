@@ -1,0 +1,5 @@
+provider:
+  server: "{{ lookup('env', 'BIGIP_HOST') }}"
+  user: "{{ lookup('env', 'BIGIP_USER') }}"
+  password: "{{ lookup('env', 'BIGIP_PASS') }}"
+  validate_certs: false

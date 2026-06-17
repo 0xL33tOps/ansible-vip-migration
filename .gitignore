@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv/
+.env
+*.retry
+__pycache__/
+.pytest_cache/
+.vscode/
+.idea/
+
+# Ansible collections - installed via: ansible-galaxy collection install -r requirements.yml
+collections/

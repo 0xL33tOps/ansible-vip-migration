@@ -1,0 +1,6 @@
+---
+- name: Ensure destination partition exists
+  f5networks.f5_modules.bigip_partition:
+    name: "{{ dest_partition }}"
+    state: present
+    provider: "{{ provider }}"

@@ -1,0 +1,6 @@
+---
+all:
+  hosts:
+    localhost:
+      ansible_connection: local
+      ansible_python_interpreter: /Users/kbiernacki/Desktop/SM_Projects/ansible-vip-migration/.venv/bin/python

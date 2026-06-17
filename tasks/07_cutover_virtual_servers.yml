@@ -1,0 +1,57 @@
+---
+# Only runs when cutover_virtual_servers=true. By this point, the pools,
+# pool members, monitors and custom profiles already exist in
+# dest_partition (steps 03/05/06) - that part is non-destructive and safe to
+# repeat/retry. The virtual server itself cannot be staged the same way: its
+# destination IP is unique device-wide, so the same IP cannot back a VS in
+# both source_partition and dest_partition at once. This step is therefore
+# a real cutover - briefly remove the VS (and its address) from
+# source_partition, then immediately recreate it in dest_partition.
+
+- name: Remove the virtual server from the source partition
+  f5networks.f5_modules.bigip_virtual_server:
+    name: "{{ item.name }}"
+    partition: "{{ source_partition }}"
+    state: absent
+    provider: "{{ provider }}"
+  loop: "{{ migrate_vs }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Remove any virtual-address object left behind in the source partition
+  f5networks.f5_modules.bigip_virtual_address:
+    address: "{{ item.destination_address }}"
+    partition: "{{ source_partition }}"
+    state: absent
+    provider: "{{ provider }}"
+  loop: "{{ migrate_vs }}"
+  loop_control:
+    label: "{{ item.destination_address }}"
+  ignore_errors: true # may not exist, or may still be in use by another VS sharing the address
+
+- name: Create the virtual server in the destination partition
+  f5networks.f5_modules.bigip_virtual_server:
+    name: "{{ item.name }}"
+    partition: "{{ dest_partition }}"
+    description: "{{ item.description | default(omit) }}"
+    destination: "{{ item.destination_address }}"
+    port: "{{ item.destination_port | default(omit) }}"
+    type: "{{ item.type | default(omit) }}"
+    source: "{{ item.source_address | default(omit) }}"
+    pool: "{{ ('/' + dest_partition + '/' + (item.default_pool | basename)) if (item.default_pool | default('')) else omit }}"
+    snat: >-
+      {{
+        'automap' if item.snat_type | default('') == 'automap'
+        else 'none' if item.snat_type | default('') == 'none'
+        else item.snat_pool if item.snat_pool is defined
+        else omit
+      }}
+    irules: "{{ item.irules | default([]) | map('regex_replace', '^/' + source_partition + '/', '/' + dest_partition + '/') | list if (item.irules | default([]) | length > 0) else omit }}"
+    default_persistence_profile: "{{ item.persistence_profile | default(omit) }}"
+    fallback_persistence_profile: "{{ item.fallback_persistence_profile | default(omit) }}"
+    profiles: "{{ vs_profiles_map.get(item.name, []) }}"
+    state: "{{ 'enabled' if item.enabled | default(true) else 'disabled' }}"
+    provider: "{{ provider }}"
+  loop: "{{ migrate_vs }}"
+  loop_control:
+    label: "{{ item.name }}"

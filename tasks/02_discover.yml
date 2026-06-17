@@ -1,0 +1,176 @@
+---
+- name: Gather LTM facts from the source partition
+  f5networks.f5_modules.bigip_device_info:
+    gather_subset:
+      - virtual-servers
+      - ltm-pools
+      - nodes
+      - http-monitors
+      - https-monitors
+      - tcp-monitors
+      - tcp-half-open-monitors
+      - gateway-icmp-monitors
+      - icmp-monitors
+      - client-ssl-profiles
+      - server-ssl-profiles
+      - http-profiles
+      - tcp-profiles
+      - udp-profiles
+      - oneconnect-profiles
+    partition: "{{ source_partition }}"
+    provider: "{{ provider }}"
+  register: src_facts
+
+# A previous run may have already cut the VS over to dest_partition (see
+# tasks/07_cutover_virtual_servers.yml). Re-running this playbook afterwards
+# (e.g. for cleanup) must still work, so the VS is looked up in dest_partition
+# too rather than failing just because it's no longer in source_partition.
+- name: Gather virtual server facts from the destination partition
+  f5networks.f5_modules.bigip_device_info:
+    gather_subset:
+      - virtual-servers
+    partition: "{{ dest_partition }}"
+    provider: "{{ provider }}"
+  register: dest_facts
+
+- name: Select the virtual servers to migrate (prefer source_partition, fall back to dest_partition if already cut over)
+  ansible.builtin.set_fact:
+    migrate_vs_in_source: "{{ src_facts.virtual_servers | default([]) | selectattr('name', 'in', vip_names) | list }}"
+    migrate_vs_in_dest: "{{ dest_facts.virtual_servers | default([]) | selectattr('name', 'in', vip_names) | list }}"
+
+- name: Combine into the final list of virtual servers to act on
+  ansible.builtin.set_fact:
+    migrate_vs: "{{ migrate_vs_in_source if (migrate_vs_in_source | length > 0) else migrate_vs_in_dest }}"
+    vs_already_cutover: "{{ migrate_vs_in_source | length == 0 and migrate_vs_in_dest | length > 0 }}"
+
+- name: Fail if none of the requested VIPs were found in either partition
+  ansible.builtin.fail:
+    msg: >-
+      None of {{ vip_names }} were found in {{ source_partition }} or {{ dest_partition }}.
+      Found in {{ source_partition }}: {{ src_facts.virtual_servers | default([]) | map(attribute='name') | list }}.
+      Found in {{ dest_partition }}: {{ dest_facts.virtual_servers | default([]) | map(attribute='name') | list }}.
+  when: migrate_vs | length == 0
+
+# Pool/monitor/profile names are identical between partitions by design (see
+# tasks/06_migrate_pools.yml etc.) - matching by basename rather than
+# full_path means this still resolves correctly to the untouched copies in
+# source_partition even when migrate_vs above came from dest_partition.
+- name: Resolve the pool names referenced by the selected VIPs
+  ansible.builtin.set_fact:
+    migrate_pool_names: "{{ migrate_vs | map(attribute='default_pool') | select('defined') | reject('equalto', '') | map('basename') | list | unique }}"
+
+- name: Select the pools backing the migrated VIPs
+  ansible.builtin.set_fact:
+    migrate_pools: "{{ src_facts.ltm_pools | default([]) | selectattr('name', 'in', migrate_pool_names) | list }}"
+
+# Each member's own full_path already tells us exactly which partition its
+# node lives in (nodes are never duplicated - see tasks/06_migrate_pools.yml
+# - so this may not be source_partition itself if this is a later hop in a
+# migration chain, e.g. still /Common after Common -> move-partition ->
+# Sample_01). tasks/06_migrate_pools.yml derives the node partition/name
+# directly from each member's full_path rather than relying on a fact built
+# here, since that's the only value guaranteed to be accurate.
+- name: Resolve the node full_paths referenced by members of the migrated pools (informational only)
+  ansible.builtin.set_fact:
+    migrate_node_paths: "{{ migrate_pools | map(attribute='members', default=[]) | flatten | map(attribute='full_path') | map('regex_replace', ':[0-9]+$', '') | list | unique }}"
+
+- name: Resolve the monitor full_paths referenced by members of the migrated pools
+  ansible.builtin.set_fact:
+    migrate_monitor_paths: >-
+      {{
+        (
+          (migrate_pools | map(attribute='monitors', default=[]) | flatten | list)
+          + (migrate_pools | map(attribute='members', default=[]) | flatten | map(attribute='monitors', default=[]) | flatten | list)
+        ) | unique
+      }}
+
+# Built-in /Common monitors (http, tcp, gateway_icmp, ...) are intentionally
+# left referenced from /Common rather than cloned - see default_monitor_parents.
+# Kept as separate per-type lists (rather than one combined list) so each
+# monitor type can be recreated with its matching bigip_monitor_* module.
+- name: Select the monitors, per type, referenced by the migrated pools
+  ansible.builtin.set_fact:
+    migrate_http_monitors: "{{ src_facts.http_monitors | default([]) | selectattr('full_path', 'in', migrate_monitor_paths) | rejectattr('name', 'in', default_monitor_parents) | list }}"
+    migrate_https_monitors: "{{ src_facts.https_monitors | default([]) | selectattr('full_path', 'in', migrate_monitor_paths) | rejectattr('name', 'in', default_monitor_parents) | list }}"
+    migrate_tcp_monitors: "{{ src_facts.tcp_monitors | default([]) | selectattr('full_path', 'in', migrate_monitor_paths) | rejectattr('name', 'in', default_monitor_parents) | list }}"
+    migrate_tcp_half_open_monitors: "{{ src_facts.tcp_half_open_monitors | default([]) | selectattr('full_path', 'in', migrate_monitor_paths) | rejectattr('name', 'in', default_monitor_parents) | list }}"
+    migrate_gateway_icmp_monitors: "{{ src_facts.gateway_icmp_monitors | default([]) | selectattr('full_path', 'in', migrate_monitor_paths) | rejectattr('name', 'in', default_monitor_parents) | list }}"
+    migrate_icmp_monitors: "{{ src_facts.icmp_monitors | default([]) | selectattr('full_path', 'in', migrate_monitor_paths) | rejectattr('name', 'in', default_monitor_parents) | list }}"
+
+- name: Build the list of custom monitor names that were recreated in the destination partition
+  ansible.builtin.set_fact:
+    migrated_custom_monitor_names: "{{ (migrate_http_monitors + migrate_https_monitors + migrate_tcp_monitors + migrate_tcp_half_open_monitors + migrate_gateway_icmp_monitors + migrate_icmp_monitors) | map(attribute='name') | list }}"
+
+- name: Resolve the full_paths of monitors that were NOT recreated (built-in defaults, e.g. /Common/http)
+  ansible.builtin.set_fact:
+    non_migrated_monitor_full_paths: "{{ migrate_monitor_paths | reject('in', (migrate_http_monitors + migrate_https_monitors + migrate_tcp_monitors + migrate_tcp_half_open_monitors + migrate_gateway_icmp_monitors + migrate_icmp_monitors) | map(attribute='full_path') | list) | list | unique }}"
+
+# Lets pool/member monitor assignments point at the recreated copy in
+# dest_partition for custom monitors. Non-migrated monitors default to
+# whatever full_path was actually observed (best effort, for monitor types
+# this playbook doesn't clone), but built-ins (default_monitor_parents) are
+# then unconditionally overridden to /Common: a pool/member can only
+# reference a monitor in /Common or its own partition, so a stale same-named
+# built-in left in some other partition by an earlier migration hop must
+# never be preserved verbatim.
+- name: Build the map of monitor name to its final full_path
+  ansible.builtin.set_fact:
+    monitor_path_map: >-
+      {{
+        dict(migrated_custom_monitor_names | zip(migrated_custom_monitor_names | map('regex_replace', '^', '/' + dest_partition + '/')))
+        | combine(dict((non_migrated_monitor_full_paths | map('basename') | list) | zip(non_migrated_monitor_full_paths)))
+        | combine(dict(default_monitor_parents | zip(default_monitor_parents | map('regex_replace', '^', '/Common/'))))
+      }}
+
+- name: Resolve the profile names attached to the migrated VIPs
+  ansible.builtin.set_fact:
+    migrate_profile_names: "{{ migrate_vs | map(attribute='profiles', default=[]) | flatten | map(attribute='name') | list | unique }}"
+
+# Built-in /Common defaults (tcp, http, clientssl, ...) are intentionally left
+# referenced from /Common rather than cloned - see default_profile_names.
+- name: Select the custom profiles, per type, attached to the migrated VIPs
+  ansible.builtin.set_fact:
+    migrate_client_ssl_profiles: "{{ src_facts.client_ssl_profiles | default([]) | selectattr('name', 'in', migrate_profile_names) | rejectattr('name', 'in', default_profile_names) | list }}"
+    migrate_server_ssl_profiles: "{{ src_facts.server_ssl_profiles | default([]) | selectattr('name', 'in', migrate_profile_names) | rejectattr('name', 'in', default_profile_names) | list }}"
+    migrate_http_profiles: "{{ src_facts.http_profiles | default([]) | selectattr('name', 'in', migrate_profile_names) | rejectattr('name', 'in', default_profile_names) | list }}"
+    migrate_tcp_profiles: "{{ src_facts.tcp_profiles | default([]) | selectattr('name', 'in', migrate_profile_names) | rejectattr('name', 'in', default_profile_names) | list }}"
+    migrate_udp_profiles: "{{ src_facts.udp_profiles | default([]) | selectattr('name', 'in', migrate_profile_names) | rejectattr('name', 'in', default_profile_names) | list }}"
+    migrate_oneconnect_profiles: "{{ src_facts.oneconnect_profiles | default([]) | selectattr('name', 'in', migrate_profile_names) | rejectattr('name', 'in', default_profile_names) | list }}"
+
+- name: Build the list of custom profile names that were recreated in the destination partition
+  ansible.builtin.set_fact:
+    migrated_custom_profile_names: "{{ (migrate_client_ssl_profiles + migrate_server_ssl_profiles + migrate_http_profiles + migrate_tcp_profiles + migrate_udp_profiles + migrate_oneconnect_profiles) | map(attribute='name') | list }}"
+
+# Builds, for each migrated VIP, the profiles list to apply in dest_partition:
+# custom (migrated) profiles get repointed at dest_partition, built-in/
+# not-recreated ones keep referencing their original full_path (works fine
+# cross-partition for /Common objects).
+# Built-in profiles (default_profile_names) always resolve to /Common,
+# regardless of what full_path was actually observed on the live object: a
+# virtual server can only reference profiles in /Common or its own
+# partition, so if an earlier migration hop ever left a stale same-named
+# profile sitting in some other partition (e.g. move-partition), blindly
+# preserving that observed full_path here would produce an invalid
+# cross-partition reference. Only profiles outside default_profile_names
+# (custom, but of a type this playbook doesn't clone) fall back to their
+# observed full_path.
+- name: Build the destination-partition profiles list for each migrated VIP
+  ansible.builtin.set_fact:
+    vs_profiles_map: >-
+      {{
+        vs_profiles_map | default({})
+        | combine({item[0].name: (vs_profiles_map | default({})).get(item[0].name, []) + [{'name': ('/' + dest_partition + '/' + item[1].name) if item[1].name in migrated_custom_profile_names else ('/Common/' + item[1].name) if item[1].name in default_profile_names else item[1].full_path, 'context': item[1].context}]})
+      }}
+  loop: "{{ migrate_vs | subelements('profiles', skip_missing=True) }}"
+  loop_control:
+    label: "{{ item[0].name }}/{{ item[1].name }}"
+
+- name: Show discovery summary
+  ansible.builtin.debug:
+    msg:
+      virtual_servers: "{{ migrate_vs | map(attribute='name') | list }}"
+      vs_already_cutover: "{{ vs_already_cutover }}"
+      pools: "{{ migrate_pools | map(attribute='name') | list }}"
+      nodes_reused_unchanged: "{{ migrate_node_paths }}"
+      monitors: "{{ (migrate_http_monitors + migrate_https_monitors + migrate_tcp_monitors + migrate_tcp_half_open_monitors + migrate_gateway_icmp_monitors + migrate_icmp_monitors) | map(attribute='name') | list }}"
+      custom_profiles: "{{ (migrate_client_ssl_profiles + migrate_server_ssl_profiles + migrate_http_profiles + migrate_tcp_profiles + migrate_udp_profiles + migrate_oneconnect_profiles) | map(attribute='name') | list }}"

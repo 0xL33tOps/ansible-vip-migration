@@ -1,0 +1,50 @@
+---
+- name: Migrate VIPs and their underlying objects between F5 BIG-IP partitions
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../vars/main.yml
+    - ../vars/migration.yml
+  tasks:
+    - name: Create destination partition
+      ansible.builtin.import_tasks: ../tasks/01_create_partition.yml
+
+    - name: Discover source objects to migrate
+      ansible.builtin.import_tasks: ../tasks/02_discover.yml
+
+    - name: Migrate monitors
+      ansible.builtin.import_tasks: ../tasks/03_migrate_monitors.yml
+
+    # Nodes are NOT duplicated into dest_partition: BIG-IP requires node
+    # addresses to be unique device-wide, not per-partition, so the recreated
+    # pool members below simply reuse the existing nodes in source_partition
+    # (see tasks/06_migrate_pools.yml).
+
+    - name: Migrate profiles
+      ansible.builtin.import_tasks: ../tasks/05_migrate_profiles.yml
+
+    - name: Migrate pools and pool members
+      ansible.builtin.import_tasks: ../tasks/06_migrate_pools.yml
+
+    # Everything above is non-destructive and safe to re-run: pools, pool
+    # members, monitors and custom profiles now exist in dest_partition
+    # alongside the still-live original VS. The virtual server's destination
+    # IP can't exist in both partitions at once, though, so it can't be
+    # staged the same way - it requires an explicit cutover.
+    - name: Cutover virtual servers (remove from source, recreate in destination)
+      ansible.builtin.import_tasks: ../tasks/07_cutover_virtual_servers.yml
+      when: cutover_virtual_servers | bool
+
+    - name: Skip virtual server cutover
+      ansible.builtin.debug:
+        msg: >-
+          Pools/members/monitors/profiles were staged in {{ dest_partition }},
+          but cutover_virtual_servers is false, so the VS itself was left
+          untouched in {{ source_partition }}. Re-run with
+          -e cutover_virtual_servers=true once you're ready for the brief
+          cutover.
+      when: not (cutover_virtual_servers | bool)
+
+    - name: Remove remaining originals from the source partition
+      ansible.builtin.import_tasks: ../tasks/08_cleanup_source.yml
+      when: remove_source_after_migration | bool and cutover_virtual_servers | bool

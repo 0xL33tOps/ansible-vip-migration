@@ -1,0 +1,103 @@
+---
+# Note: only the most commonly customized fields are carried over for each
+# profile type. Review recreated profiles for highly customized settings
+# that are not listed here (e.g. forward-proxy SSL, HSTS, header rewriting).
+
+- name: Recreate Client SSL profiles in destination partition
+  f5networks.f5_modules.bigip_profile_client_ssl:
+    name: "{{ item.name }}"
+    partition: "{{ dest_partition }}"
+    parent: "/{{ source_partition }}/{{ item.parent | regex_replace('^/?' + source_partition + '/', '') }}"
+    ciphers: "{{ item.ciphers | default(omit) }}"
+    cert_key_chain:
+      - name: default
+        cert: "{{ item.certificate_file }}"
+        key: "{{ item.key_file }}"
+        chain: "{{ item.chain_file | default(omit) }}"
+    sni_default: "{{ item.sni_default | default(omit) }}"
+    sni_require: "{{ item.sni_require | default(omit) }}"
+    allow_non_ssl: "{{ item.allow_non_ssl | default(omit) }}"
+    state: present
+    provider: "{{ provider }}"
+  loop: "{{ migrate_client_ssl_profiles }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: item.certificate_file is defined and item.key_file is defined
+
+- name: Recreate Server SSL profiles in destination partition
+  f5networks.f5_modules.bigip_profile_server_ssl:
+    name: "{{ item.name }}"
+    partition: "{{ dest_partition }}"
+    parent: "/{{ source_partition }}/{{ item.parent | regex_replace('^/?' + source_partition + '/', '') }}"
+    ciphers: "{{ item.ciphers | default(omit) }}"
+    certificate: "{{ item.cert | default(omit) }}"
+    key: "{{ item.key | default(omit) }}"
+    chain: "{{ item.chain | default(omit) }}"
+    state: present
+    provider: "{{ provider }}"
+  loop: "{{ migrate_server_ssl_profiles }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Recreate HTTP profiles in destination partition
+  f5networks.f5_modules.bigip_profile_http:
+    name: "{{ item.name }}"
+    partition: "{{ dest_partition }}"
+    parent: "/{{ source_partition }}/{{ item.parent | regex_replace('^/?' + source_partition + '/', '') }}"
+    insert_xforwarded_for: "{{ item.insert_xforwarded_for | default(omit) }}"
+    redirect_rewrite: "{{ item.redirect_rewrite | default(omit) }}"
+    accept_xff: "{{ item.accept_xff | default(omit) }}"
+    oneconnect_transformations: "{{ item.onconnect_transformations | default(omit) }}"
+    server_agent_name: "{{ item.server_agent_name | default(omit) }}"
+    state: present
+    provider: "{{ provider }}"
+  loop: "{{ migrate_http_profiles }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Recreate TCP profiles in destination partition
+  f5networks.f5_modules.bigip_profile_tcp:
+    name: "{{ item.name }}"
+    partition: "{{ dest_partition }}"
+    parent: "/{{ source_partition }}/{{ item.parent | regex_replace('^/?' + source_partition + '/', '') }}"
+    idle_timeout: "{{ item.idle_timeout | default(omit) }}"
+    keep_alive_interval: "{{ item.keep_alive_interval | default(omit) }}"
+    delayed_acks: "{{ item.delayed_acks | default(omit) }}"
+    initial_congestion_window_size: "{{ item.initial_congestion_window_size | default(omit) }}"
+    initial_receive_window_size: "{{ item.initial_receive_window_size | default(omit) }}"
+    state: present
+    provider: "{{ provider }}"
+  loop: "{{ migrate_tcp_profiles }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Recreate UDP profiles in destination partition
+  f5networks.f5_modules.bigip_profile_udp:
+    name: "{{ item.name }}"
+    partition: "{{ dest_partition }}"
+    parent: "/{{ source_partition }}/{{ item.parent | regex_replace('^/?' + source_partition + '/', '') }}"
+    idle_timeout: "{{ item.idle_timeout | default(omit) }}"
+    datagram_load_balancing: "{{ item.datagram_load_balancing | default(omit) }}"
+    state: present
+    provider: "{{ provider }}"
+  loop: "{{ migrate_udp_profiles }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Recreate OneConnect profiles in destination partition
+  f5networks.f5_modules.bigip_profile_oneconnect:
+    name: "{{ item.name }}"
+    partition: "{{ dest_partition }}"
+    parent: "/{{ source_partition }}/{{ item.parent | regex_replace('^/?' + source_partition + '/', '') }}"
+    source_mask: "{{ item.source_mask | default(omit) }}"
+    maximum_size: "{{ item.max_size | default(omit) }}"
+    maximum_age: "{{ item.max_age | default(omit) }}"
+    maximum_reuse: "{{ item.max_reuse | default(omit) }}"
+    idle_timeout_override: "{{ item.idle_timeout_override | default(omit) }}"
+    limit_type: "{{ item.limit_type | default(omit) }}"
+    share_pools: "{{ item.share_pools | default(omit) }}"
+    state: present
+    provider: "{{ provider }}"
+  loop: "{{ migrate_oneconnect_profiles }}"
+  loop_control:
+    label: "{{ item.name }}"

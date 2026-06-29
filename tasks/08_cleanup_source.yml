@@ -1,27 +1,10 @@
 ---
 # Only runs when remove_source_after_migration=true AND
-# cutover_virtual_servers=true (the VS itself is already gone from
-# source_partition by this point - see tasks/07_cutover_virtual_servers.yml).
-# Deletes the remaining originals (pool/members/monitors/profiles) from
+# cutover_virtual_servers=true. By this point the VS, pool members and their
+# backing nodes are already gone from source_partition - see
+# tasks/07_cutover_virtual_servers.yml. Deletes the remaining originals
+# (the now-empty pools, custom monitors, custom profiles) from
 # source_partition now that the copies in dest_partition exist and are live.
-
-- name: Remove pool members from source partition
-  f5networks.f5_modules.bigip_pool_member:
-    pool: "{{ item[0].name }}"
-    partition: "{{ source_partition }}"
-    name: "{{ item[1].name.split(':')[0] }}"
-    address: "{{ item[1].address }}"
-    port: "{{ item[1].full_path.split(':')[-1] }}"
-    # The underlying node is still referenced by the migrated member in
-    # dest_partition (nodes are shared, never duplicated - see
-    # tasks/06_migrate_pools.yml), so don't let removing this member also
-    # try to delete the node.
-    preserve_node: true
-    state: absent
-    provider: "{{ provider }}"
-  loop: "{{ migrate_pools | subelements('members', skip_missing=True) }}"
-  loop_control:
-    label: "{{ item[0].name }}/{{ item[1].name }}"
 
 - name: Remove pools from source partition
   f5networks.f5_modules.bigip_pool:
@@ -32,11 +15,6 @@
   loop: "{{ migrate_pools }}"
   loop_control:
     label: "{{ item.name }}"
-
-# Nodes are intentionally left in place: they were never duplicated (see
-# tasks/06_migrate_pools.yml) and the pool members in dest_partition
-# reference these same nodes, so removing them here would break the
-# migration that was just performed.
 
 - name: Remove HTTP monitors from source partition
   f5networks.f5_modules.bigip_monitor_http:

@@ -21,3 +21,7 @@ collections/
 # Local-only oneshot/spec prompts, not meant to be synced to git
 ONESHOT_PROMPT.md
 PROMPT.md
+
+# Local-only reference material with real internal infra details, not
+# meant to be synced to this public repo
+MANUAL_CHANGE

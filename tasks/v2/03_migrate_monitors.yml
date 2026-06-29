@@ -1,0 +1,160 @@
+---
+- name: Recreate HTTP monitors in destination partition
+  f5networks.f5_modules.bigip_monitor_http:
+    name: "{{ item_name_with_folder }}"
+    partition: "{{ dest_partition }}"
+    parent: "/{{ source_partition }}/{{ item.parent | regex_replace('^/?' + source_partition + '/', '') }}"
+    send: "{{ item.send_string | default(omit) }}"
+    receive: "{{ item.receive_string | default(omit) }}"
+    ip: "{{ item.destination.split(':')[0] | default(omit) }}"
+    port: "{{ item.destination.split(':')[1] | default(omit) }}"
+    interval: "{{ item.interval | default(omit) }}"
+    timeout: "{{ item.timeout | default(omit) }}"
+    time_until_up: "{{ item.time_until_up | default(omit) }}"
+    state: present
+    provider: "{{ provider }}"
+  loop: "{{ migrate_http_monitors }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    # Folder-aware: a monitor that lived in a sub-folder of source_partition
+    # is recreated in the same-named sub-folder of dest_partition.
+    item_folder: >-
+      {{
+        (item.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    item_name_with_folder: "{{ (item_folder + '/' + item.name) if item_folder else item.name }}"
+
+- name: Recreate HTTPS monitors in destination partition
+  f5networks.f5_modules.bigip_monitor_https:
+    name: "{{ item_name_with_folder }}"
+    partition: "{{ dest_partition }}"
+    parent: "/{{ source_partition }}/{{ item.parent | regex_replace('^/?' + source_partition + '/', '') }}"
+    send: "{{ item.send_string | default(omit) }}"
+    receive: "{{ item.receive_string | default(omit) }}"
+    ip: "{{ item.destination.split(':')[0] | default(omit) }}"
+    port: "{{ item.destination.split(':')[1] | default(omit) }}"
+    interval: "{{ item.interval | default(omit) }}"
+    timeout: "{{ item.timeout | default(omit) }}"
+    time_until_up: "{{ item.time_until_up | default(omit) }}"
+    state: present
+    provider: "{{ provider }}"
+  loop: "{{ migrate_https_monitors }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    # Folder-aware: a monitor that lived in a sub-folder of source_partition
+    # is recreated in the same-named sub-folder of dest_partition.
+    item_folder: >-
+      {{
+        (item.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    item_name_with_folder: "{{ (item_folder + '/' + item.name) if item_folder else item.name }}"
+
+- name: Recreate TCP monitors in destination partition
+  f5networks.f5_modules.bigip_monitor_tcp:
+    name: "{{ item_name_with_folder }}"
+    partition: "{{ dest_partition }}"
+    parent: "/{{ source_partition }}/{{ item.parent | regex_replace('^/?' + source_partition + '/', '') }}"
+    send: "{{ item.send_string | default(omit) }}"
+    receive: "{{ item.receive_string | default(omit) }}"
+    ip: "{{ item.destination.split(':')[0] | default(omit) }}"
+    port: "{{ item.destination.split(':')[1] | default(omit) }}"
+    interval: "{{ item.interval | default(omit) }}"
+    timeout: "{{ item.timeout | default(omit) }}"
+    time_until_up: "{{ item.time_until_up | default(omit) }}"
+    state: present
+    provider: "{{ provider }}"
+  loop: "{{ migrate_tcp_monitors }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    # Folder-aware: a monitor that lived in a sub-folder of source_partition
+    # is recreated in the same-named sub-folder of dest_partition.
+    item_folder: >-
+      {{
+        (item.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    item_name_with_folder: "{{ (item_folder + '/' + item.name) if item_folder else item.name }}"
+
+- name: Recreate TCP half-open monitors in destination partition
+  f5networks.f5_modules.bigip_monitor_tcp_half_open:
+    name: "{{ item_name_with_folder }}"
+    partition: "{{ dest_partition }}"
+    parent: "/{{ source_partition }}/{{ item.parent | regex_replace('^/?' + source_partition + '/', '') }}"
+    ip: "{{ item.destination.split(':')[0] | default(omit) }}"
+    port: "{{ item.destination.split(':')[1] | default(omit) }}"
+    interval: "{{ item.interval | default(omit) }}"
+    timeout: "{{ item.timeout | default(omit) }}"
+    time_until_up: "{{ item.time_until_up | default(omit) }}"
+    state: present
+    provider: "{{ provider }}"
+  loop: "{{ migrate_tcp_half_open_monitors }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    # Folder-aware: a monitor that lived in a sub-folder of source_partition
+    # is recreated in the same-named sub-folder of dest_partition.
+    item_folder: >-
+      {{
+        (item.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    item_name_with_folder: "{{ (item_folder + '/' + item.name) if item_folder else item.name }}"
+
+- name: Recreate gateway ICMP monitors in destination partition
+  f5networks.f5_modules.bigip_monitor_gateway_icmp:
+    name: "{{ item_name_with_folder }}"
+    partition: "{{ dest_partition }}"
+    parent: "/{{ source_partition }}/{{ item.parent | regex_replace('^/?' + source_partition + '/', '') }}"
+    ip: "{{ item.destination.split(':')[0] | default(omit) }}"
+    port: "{{ item.destination.split(':')[1] | default(omit) }}"
+    interval: "{{ item.interval | default(omit) }}"
+    timeout: "{{ item.timeout | default(omit) }}"
+    time_until_up: "{{ item.time_until_up | default(omit) }}"
+    state: present
+    provider: "{{ provider }}"
+  loop: "{{ migrate_gateway_icmp_monitors }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    # Folder-aware: a monitor that lived in a sub-folder of source_partition
+    # is recreated in the same-named sub-folder of dest_partition.
+    item_folder: >-
+      {{
+        (item.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    item_name_with_folder: "{{ (item_folder + '/' + item.name) if item_folder else item.name }}"
+
+- name: Recreate ICMP monitors in destination partition
+  f5networks.f5_modules.bigip_monitor_icmp:
+    name: "{{ item_name_with_folder }}"
+    partition: "{{ dest_partition }}"
+    parent: "/{{ source_partition }}/{{ item.parent | regex_replace('^/?' + source_partition + '/', '') }}"
+    interval: "{{ item.interval | default(omit) }}"
+    timeout: "{{ item.timeout | default(omit) }}"
+    time_until_up: "{{ item.time_until_up | default(omit) }}"
+    state: present
+    provider: "{{ provider }}"
+  loop: "{{ migrate_icmp_monitors }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    # Folder-aware: a monitor that lived in a sub-folder of source_partition
+    # is recreated in the same-named sub-folder of dest_partition.
+    item_folder: >-
+      {{
+        (item.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    item_name_with_folder: "{{ (item_folder + '/' + item.name) if item_folder else item.name }}"

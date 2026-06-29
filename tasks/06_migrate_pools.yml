@@ -21,35 +21,11 @@
   vars:
     pool_monitors: "{{ item.monitors | default((item.members | default([]) | first | default({})).monitors | default([])) }}"
 
-- name: Recreate pool members in destination partition
-  f5networks.f5_modules.bigip_pool_member:
-    # "pool" carries its own full_path so the lookup isn't tied to the
-    # member-object "partition" below. Pool member sub-objects can live in a
-    # different partition than their parent pool (this is how BIG-IP lets
-    # pools in any partition share nodes from elsewhere) - "partition" here
-    # governs the *member/node* object, not the pool. It's derived directly
-    # from the member's own full_path (node_partition/node_name below)
-    # rather than assumed to be source_partition, because the underlying
-    # node is never duplicated and may actually live in a partition further
-    # back in a migration chain (e.g. still /Common after a Common ->
-    # move-partition -> Sample_01 chain) - not necessarily source_partition
-    # of the current run.
-    pool: "/{{ dest_partition }}/{{ item[0].name }}"
-    partition: "{{ node_partition }}"
-    name: "{{ node_name }}"
-    address: "{{ item[1].address }}"
-    port: "{{ item[1].full_path.split(':')[-1] }}"
-    description: "{{ item[1].description | default(omit) }}"
-    connection_limit: "{{ item[1].connection_limit | default(omit) }}"
-    ratio: "{{ item[1].ratio | default(omit) }}"
-    priority_group: "{{ item[1].priority_group | default(omit) }}"
-    monitors: "{{ item[1].monitors | default([]) | map('basename') | map('extract', monitor_path_map) | list if (item[1].monitors | default([]) | length > 0) else omit }}"
-    state: present
-    provider: "{{ provider }}"
-  loop: "{{ migrate_pools | subelements('members', skip_missing=True) }}"
-  loop_control:
-    label: "{{ item[0].name }}/{{ item[1].name }}"
-  vars:
-    node_full_path: "{{ item[1].full_path | regex_replace(':[0-9]+$', '') }}"
-    node_partition: "{{ node_full_path.split('/')[1] }}"
-    node_name: "{{ node_full_path.split('/')[-1] }}"
+# Pool members are NOT created here. A pool member can only reference a node
+# in /Common or its own partition, and the nodes backing these members
+# currently live in source_partition (or an earlier hop's partition) - not
+# dest_partition. Moving a node (its address is unique device-wide, so it
+# can't simply be duplicated) is therefore a brief, real interruption like
+# the VS cutover itself, so pool members are created in
+# tasks/07_cutover_virtual_servers.yml, gated behind cutover_virtual_servers,
+# right after the backing nodes are moved into dest_partition.

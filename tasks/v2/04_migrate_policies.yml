@@ -1,0 +1,105 @@
+---
+# Custom (non-/Common) LTM policies attached to the migrated VIPs are cloned
+# into dest_partition. bigip_policy's state=present both creates AND
+# publishes the policy (per the module's own docs: "When state is present,
+# ensures the policy exists and is published"), so no separate publish step
+# is needed - this automates what a manual tmsh change would otherwise
+# require a GUI "publish" step for.
+#
+# NOTE: this only handles LTM (Local Traffic Manager) policies - the kind
+# created with `tmsh create ltm policy ...` and recreated here via
+# bigip_policy/bigip_policy_rule. True ASM/WAF security policies (a
+# different object model entirely - asm-policies gather_subset,
+# bigip_asm_policy_* modules) are explicitly OUT OF SCOPE and are not
+# migrated by this playbook; references to them (if any) are left pointing
+# at the original /Common-shared object, same as other /Common objects.
+#
+# Action/condition translation only covers the two rule shapes this org's
+# policies actually use: a redirect action (httpReply+redirect+location)
+# and an exact-match http_uri condition (http_uri+values). Anything else
+# fails loudly rather than being silently mis-translated - extend the
+# translation tasks below if a new shape is encountered.
+
+# subelements can't fan out across two separate list levels in one call
+# (policies->rules is one list, rules->actions/conditions is another,
+# nested list) - each rule's actions/conditions are translated via a small
+# included tasks file instead, one invocation per (policy, rule) pair.
+- name: Translate each rule's actions and conditions into bigip_policy_rule's typed form
+  ansible.builtin.include_tasks: _translate_policy_rule.yml
+  loop: "{{ migrate_policies | subelements('rules', skip_missing=True) }}"
+  loop_control:
+    label: "{{ policy_rule_pair[0].name }}/{{ policy_rule_pair[1].name }}"
+    loop_var: policy_rule_pair
+  vars:
+    policy: "{{ policy_rule_pair[0] }}"
+    rule: "{{ policy_rule_pair[1] }}"
+
+# bigip_device_info returns "strategy" as a full path with a "-match"
+# suffix (e.g. "/Common/first-match"), but the module's own "strategy"
+# param only accepts the bare enum first|all|best - basename() then
+# stripping "-match" converts one to the other.
+- name: Recreate custom LTM policies (shell) in destination partition
+  f5networks.f5_modules.bigip_policy:
+    name: "{{ item_name_with_folder }}"
+    partition: "{{ dest_partition }}"
+    description: "{{ item.description | default(omit) }}"
+    strategy: "{{ (item.strategy | basename | regex_replace('-match$', '')) if item.strategy is defined else omit }}"
+    state: present
+    provider: "{{ provider }}"
+  loop: "{{ migrate_policies }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    # Folder-aware: a policy that lived in a sub-folder of source_partition
+    # is recreated in the same-named sub-folder of dest_partition.
+    item_folder: >-
+      {{
+        (item.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    item_name_with_folder: "{{ (item_folder + '/' + item.name) if item_folder else item.name }}"
+
+- name: Recreate rules for each custom LTM policy in destination partition
+  f5networks.f5_modules.bigip_policy_rule:
+    policy: "{{ policy_name_with_folder }}"
+    partition: "{{ dest_partition }}"
+    name: "{{ item[1].name }}"
+    actions: "{{ migrate_policy_rule_actions[item[0].name + '/' + item[1].name] | default([]) }}"
+    conditions: "{{ migrate_policy_rule_conditions[item[0].name + '/' + item[1].name] | default([]) }}"
+    state: present
+    provider: "{{ provider }}"
+  loop: "{{ migrate_policies | subelements('rules', skip_missing=True) }}"
+  loop_control:
+    label: "{{ item[0].name }}/{{ item[1].name }}"
+  vars:
+    policy_folder: >-
+      {{
+        (item[0].full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item[0].full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    policy_name_with_folder: "{{ (policy_folder + '/' + item[0].name) if policy_folder else item[0].name }}"
+
+# bigip_policy's `state: present` ensures the policy is published (not left
+# in draft) once rules above have been added. Re-asserting it here is a
+# safe, idempotent no-op if it's already published - guards against any
+# BIG-IP versions/behaviors where adding rules via bigip_policy_rule could
+# leave a policy back in draft state.
+- name: Re-assert publish of recreated LTM policies
+  f5networks.f5_modules.bigip_policy:
+    name: "{{ item_name_with_folder }}"
+    partition: "{{ dest_partition }}"
+    state: present
+    provider: "{{ provider }}"
+  loop: "{{ migrate_policies }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    item_folder: >-
+      {{
+        (item.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    item_name_with_folder: "{{ (item_folder + '/' + item.name) if item_folder else item.name }}"

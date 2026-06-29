@@ -1,0 +1,46 @@
+---
+# Included per (policy, rule) pair from tasks/v2/04_migrate_policies.yml.
+# ansible.builtin.subelements can't fan out across two separate list levels
+# in one call (policy->rules is one list, rule->actions/conditions is
+# another, nested list) - it only supports a single list expansion per
+# call, with optional dict-only navigation before it. So each rule's
+# actions and conditions are translated here via their own small loops
+# instead, one include_tasks invocation per rule.
+
+- name: "Translate actions for {{ policy.name }}/{{ rule.name }}"
+  ansible.builtin.set_fact:
+    migrate_policy_rule_actions: >-
+      {{
+        migrate_policy_rule_actions | default({})
+        | combine({(policy.name + '/' + rule.name): (migrate_policy_rule_actions | default({})).get(policy.name + '/' + rule.name, []) + [translated_action]})
+      }}
+  loop: "{{ rule.actions | default([]) }}"
+  loop_control:
+    loop_var: action
+    label: "{{ policy.name }}/{{ rule.name }}"
+  vars:
+    translated_action: >-
+      {{
+        {'type': 'redirect', 'location': action.location}
+        if (action.redirect | default(false) | bool and action.httpReply | default(false) | bool and action.location is defined)
+        else (undef(hint="Unrecognized policy rule action shape: " + (action | string) + " - extend tasks/v2/_translate_policy_rule.yml to handle it."))
+      }}
+
+- name: "Translate conditions for {{ policy.name }}/{{ rule.name }}"
+  ansible.builtin.set_fact:
+    migrate_policy_rule_conditions: >-
+      {{
+        migrate_policy_rule_conditions | default({})
+        | combine({(policy.name + '/' + rule.name): (migrate_policy_rule_conditions | default({})).get(policy.name + '/' + rule.name, []) + [translated_condition]})
+      }}
+  loop: "{{ rule.conditions | default([]) }}"
+  loop_control:
+    loop_var: condition
+    label: "{{ policy.name }}/{{ rule.name }}"
+  vars:
+    translated_condition: >-
+      {{
+        {'type': 'http_uri', 'path_is_any': condition['values']}
+        if (condition.http_uri | default('no') == 'yes' and condition['values'] is defined)
+        else (undef(hint="Unrecognized policy rule condition shape: " + (condition | string) + " - extend tasks/v2/_translate_policy_rule.yml to handle it."))
+      }}

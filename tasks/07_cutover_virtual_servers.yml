@@ -1,12 +1,79 @@
 ---
-# Only runs when cutover_virtual_servers=true. By this point, the pools,
-# pool members, monitors and custom profiles already exist in
-# dest_partition (steps 03/05/06) - that part is non-destructive and safe to
-# repeat/retry. The virtual server itself cannot be staged the same way: its
-# destination IP is unique device-wide, so the same IP cannot back a VS in
-# both source_partition and dest_partition at once. This step is therefore
-# a real cutover - briefly remove the VS (and its address) from
-# source_partition, then immediately recreate it in dest_partition.
+# Only runs when cutover_virtual_servers=true. By this point, the (memberless)
+# pools, monitors and custom profiles already exist in dest_partition (steps
+# 03/05/06) - that part is non-destructive and safe to repeat/retry. Pool
+# members and their backing nodes, and the virtual server itself, cannot be
+# staged the same way: node addresses and VS destination IPs are both unique
+# device-wide, so neither can exist in both partitions at once. This step is
+# therefore a real cutover - briefly remove members/nodes/VS from
+# source_partition, then immediately recreate them in dest_partition.
+
+# bigip_pool_member resolves the pool path with fq_name() (which ignores
+# "partition" once a value already starts with "/", so passing it fully
+# qualified here keeps the pool lookup correct), but resolves the *member*
+# path with transform_name(partition, name-or-address) - which always
+# prefixes "partition" verbatim. The real member ID on the device is
+# prefixed with the node's own partition (e.g. /Common), not the pool's, so
+# "partition" here must be the node's partition - not source_partition -
+# or the module silently matches nothing and leaves the member (and its
+# node) in place. "name" is intentionally omitted so the module falls back
+# to address+port for the match instead of needing it pre-qualified too.
+- name: Remove pool members referencing the migrated nodes from the source partition
+  f5networks.f5_modules.bigip_pool_member:
+    pool: "/{{ source_partition }}/{{ item[0].name }}"
+    partition: "{{ node_partition }}"
+    address: "{{ item[1].address }}"
+    port: "{{ item[1].full_path.split(':')[-1] }}"
+    state: absent
+    provider: "{{ provider }}"
+  loop: "{{ migrate_pools | subelements('members', skip_missing=True) }}"
+  loop_control:
+    label: "{{ item[0].name }}/{{ item[1].name }}"
+  vars:
+    node_full_path: "{{ item[1].full_path | regex_replace(':[0-9]+$', '') }}"
+    node_partition: "{{ node_full_path.split('/')[1] }}"
+
+- name: Remove the now-unreferenced nodes from their current partition
+  f5networks.f5_modules.bigip_node:
+    name: "{{ item.name }}"
+    partition: "{{ item.partition }}"
+    state: absent
+    provider: "{{ provider }}"
+  loop: "{{ migrate_nodes }}"
+  loop_control:
+    label: "{{ item.partition }}/{{ item.name }}"
+
+- name: Recreate the nodes in the destination partition
+  f5networks.f5_modules.bigip_node:
+    name: "{{ item.name }}"
+    partition: "{{ dest_partition }}"
+    address: "{{ item.address }}"
+    state: present
+    provider: "{{ provider }}"
+  loop: "{{ migrate_nodes }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Recreate pool members in destination partition
+  f5networks.f5_modules.bigip_pool_member:
+    pool: "/{{ dest_partition }}/{{ item[0].name }}"
+    partition: "{{ dest_partition }}"
+    name: "{{ node_name }}"
+    address: "{{ item[1].address }}"
+    port: "{{ item[1].full_path.split(':')[-1] }}"
+    description: "{{ item[1].description | default(omit) }}"
+    connection_limit: "{{ item[1].connection_limit | default(omit) }}"
+    ratio: "{{ item[1].ratio | default(omit) }}"
+    priority_group: "{{ item[1].priority_group | default(omit) }}"
+    monitors: "{{ item[1].monitors | default([]) | map('basename') | map('extract', monitor_path_map) | list if (item[1].monitors | default([]) | length > 0) else omit }}"
+    state: present
+    provider: "{{ provider }}"
+  loop: "{{ migrate_pools | subelements('members', skip_missing=True) }}"
+  loop_control:
+    label: "{{ item[0].name }}/{{ item[1].name }}"
+  vars:
+    node_full_path: "{{ item[1].full_path | regex_replace(':[0-9]+$', '') }}"
+    node_name: "{{ node_full_path.split('/')[-1] }}"
 
 - name: Remove the virtual server from the source partition
   f5networks.f5_modules.bigip_virtual_server:

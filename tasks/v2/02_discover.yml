@@ -17,6 +17,7 @@
       - tcp-profiles
       - udp-profiles
       - oneconnect-profiles
+      - ltm-policies
     partition: "{{ source_partition }}"
     provider: "{{ provider }}"
   register: src_facts
@@ -32,6 +33,14 @@
     partition: "{{ dest_partition }}"
     provider: "{{ provider }}"
   register: dest_facts
+
+- name: Gather virtual-address facts from the source partition
+  f5networks.f5_modules.bigip_device_info:
+    gather_subset:
+      - virtual-addresses
+    partition: "{{ source_partition }}"
+    provider: "{{ provider }}"
+  register: src_va_facts
 
 - name: Select the virtual servers to migrate (prefer source_partition, fall back to dest_partition if already cut over)
   ansible.builtin.set_fact:
@@ -62,6 +71,41 @@
 - name: Select the pools backing the migrated VIPs
   ansible.builtin.set_fact:
     migrate_pools: "{{ src_facts.ltm_pools | default([]) | selectattr('name', 'in', migrate_pool_names) | list }}"
+
+# Pool-level "monitors" from bigip_device_info comes back in two different
+# shapes depending on the configured monitor rule: a plain list of full
+# paths for the simple (single monitor, or plain AND of monitors) case, or
+# a raw tmsh-style compound string (e.g. "min 1 of { /Common/tcp_half_open }")
+# for the "min N of {...}" (m_of_n/quorum) case - confirmed directly
+# against a live device; bigip_device_info's LtmPoolsParameters does a
+# plain api_map rename with no further parsing, so this is exactly what the
+# BIG-IP REST API itself returns for the "monitor" field. Falls back to the
+# first member's monitor list when the pool-level value is empty/absent,
+# same as the fallback this playbook always had.
+- name: Parse the monitor field for each migrated pool
+  ansible.builtin.set_fact:
+    pool_monitor_info: >-
+      {{
+        pool_monitor_info | default({})
+        | combine({item.name: {
+            'quorum': (raw_monitors | regex_replace('^.*min\s+(\d+)\s+of.*$', '\1')) if is_compound_string else None,
+            'monitor_type': 'm_of_n' if is_compound_string else ('and_list' if (monitor_paths | length > 1) else ('single' if (monitor_paths | length == 1) else None)),
+            'monitor_paths': monitor_paths,
+          }})
+      }}
+  loop: "{{ migrate_pools }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    raw_monitors: "{{ item.monitors | default([]) }}"
+    is_compound_string: "{{ raw_monitors is string and raw_monitors is regex('min\\s+\\d+\\s+of') }}"
+    monitor_paths: >-
+      {{
+        (raw_monitors | regex_findall('/[\w-]+/[^\s}]+'))
+        if (raw_monitors is string and raw_monitors | length > 0)
+        else (raw_monitors if (raw_monitors is sequence and raw_monitors is not string and raw_monitors | length > 0)
+        else ((item.members | default([]) | first | default({})).monitors | default([])))
+      }}
 
 # Each member's own full_path already tells us exactly which partition its
 # node currently lives in - this may not be source_partition itself if this
@@ -135,11 +179,32 @@
 # reference a monitor in /Common or its own partition, so a stale same-named
 # built-in left in some other partition by an earlier migration hop must
 # never be preserved verbatim.
+# Folder-aware: a custom monitor that lived in a sub-folder of
+# source_partition is recreated in the same-named sub-folder of
+# dest_partition rather than flattened to the partition root.
+- name: Build the map of custom monitor name to its destination full_path
+  ansible.builtin.set_fact:
+    custom_monitor_path_map: >-
+      {{
+        custom_monitor_path_map | default({})
+        | combine({item.name: '/' + dest_partition + (('/' + item_folder) if item_folder else '') + '/' + item.name})
+      }}
+  loop: "{{ migrate_http_monitors + migrate_https_monitors + migrate_tcp_monitors + migrate_tcp_half_open_monitors + migrate_gateway_icmp_monitors + migrate_icmp_monitors }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    item_folder: >-
+      {{
+        (item.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+
 - name: Build the map of monitor name to its final full_path
   ansible.builtin.set_fact:
     monitor_path_map: >-
       {{
-        dict(migrated_custom_monitor_names | zip(migrated_custom_monitor_names | map('regex_replace', '^', '/' + dest_partition + '/')))
+        (custom_monitor_path_map | default({}))
         | combine(dict((non_migrated_monitor_full_paths | map('basename') | list) | zip(non_migrated_monitor_full_paths)))
         | combine(dict(default_monitor_parents | zip(default_monitor_parents | map('regex_replace', '^', '/Common/'))))
       }}
@@ -172,25 +237,160 @@
 # move-partition), blindly preserving that observed full_path would produce
 # an invalid cross-partition reference.
 #
-# Anything that's neither a migrated custom profile nor a built-in is
-# dropped from the list entirely rather than passed through by full_path.
-# Profiles like ASM's bot-defense-asm (context "all", auto-attached
-# alongside an ASM/L7 policy) are managed by BIG-IP itself and rejected if
-# explicitly specified without their controlling policy also attached;
-# since this playbook doesn't migrate LTM/ASM policies (see README), there
-# is no safe way to carry these over - they're left behind, same as the
-# policies themselves.
+# Anything that's neither a migrated custom profile nor a built-in is kept
+# only if it's already observed sitting in /Common - a VS can only
+# reference a profile in /Common or its own partition, so anything observed
+# in some other non-/Common, non-source partition would be an invalid
+# reference and must be dropped. Profiles like ASM's bot-defense-asm
+# (context "all", auto-attached alongside an ASM/L7 policy) are managed by
+# BIG-IP itself and rejected if explicitly specified without their
+# controlling policy also attached - but that's no longer a reason to drop
+# them here, since tasks/v2/04_migrate_policies.yml now migrates the
+# controlling LTM/ASM policy alongside the VS, so it travels with it.
 - name: Build the destination-partition profiles list for each migrated VIP
   ansible.builtin.set_fact:
     vs_profiles_map: >-
       {{
         vs_profiles_map | default({})
-        | combine({item[0].name: (vs_profiles_map | default({})).get(item[0].name, []) + [{'name': ('/' + dest_partition + '/' + item[1].name) if item[1].name in migrated_custom_profile_names else ('/Common/' + item[1].name), 'context': item[1].context}]})
+        | combine({item[0].name: (vs_profiles_map | default({})).get(item[0].name, []) + [{'name': ('/' + dest_partition + (('/' + profile_folder) if profile_folder else '') + '/' + item[1].name) if item[1].name in migrated_custom_profile_names else ('/Common/' + item[1].name) if item[1].name in default_profile_names else item[1].full_path, 'context': item[1].context}]})
       }}
   loop: "{{ migrate_vs | subelements('profiles', skip_missing=True) }}"
   loop_control:
     label: "{{ item[0].name }}/{{ item[1].name }}"
-  when: item[1].name in migrated_custom_profile_names or item[1].name in default_profile_names
+  vars:
+    # Folder-aware: a custom profile that lived in a sub-folder of
+    # source_partition is recreated in the same-named sub-folder of
+    # dest_partition rather than flattened to the partition root.
+    profile_folder: >-
+      {{
+        (item[1].full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item[1].full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+  when: >-
+    item[1].name in migrated_custom_profile_names
+    or item[1].name in default_profile_names
+    or item[1].full_path is regex('^/Common/')
+
+# item.policies (VS fact) is a flat list of full_path strings (e.g.
+# "/Common/asm_auto_l7_policy__HTTP-Testing-VIP"), NOT a list of
+# {name, partition} dicts - confirmed directly against a live device.
+#
+# Matched by basename against src_facts (queried against source_partition
+# only), same as migrate_pool_names/migrate_monitor_paths/migrate_profile_names
+# above - not by full_path. This matters for two reasons: (1) a previous
+# run may have already cut the VS over, in which case migrate_vs (and so
+# its "policies" list) comes from dest_facts and already shows the
+# dest-partition path - exact full_path matching against src_facts would
+# then never match anything, silently breaking re-discovery for cleanup;
+# (2) src_facts is queried with partition=source_partition, which never
+# includes /Common objects at all - so a policy that's only in /Common
+# naturally won't match here either, which is exactly the desired "don't
+# clone /Common policies" behavior, no separate /Common-path rejection
+# needed.
+- name: Build the list of policy names attached to the migrated VIPs
+  ansible.builtin.set_fact:
+    migrate_policy_names: "{{ migrate_vs | map(attribute='policies', default=[]) | flatten | map('basename') | list | unique }}"
+
+# True ASM/WAF security policies are a separate object model entirely
+# (asm-policies gather_subset, bigip_asm_policy_* modules) and are
+# explicitly out of scope - this only handles LTM (Local Traffic Manager)
+# policies, the kind managed by bigip_policy/bigip_policy_rule.
+- name: Select the custom LTM policies to clone
+  ansible.builtin.set_fact:
+    migrate_policies: "{{ src_facts.ltm_policies | default([]) | selectattr('name', 'in', migrate_policy_names) | list }}"
+
+- name: Build the list of custom policy names that will be recreated in the destination partition
+  ansible.builtin.set_fact:
+    migrated_custom_policy_names: "{{ migrate_policies | map(attribute='name') | list }}"
+
+# Mirrors vs_profiles_map: per-VIP list of policy full_paths to apply in
+# dest_partition. Custom policies repoint at dest_partition; /Common (or any
+# other already-shared) policies are referenced unchanged.
+- name: Build the destination-partition policies list for each migrated VIP
+  ansible.builtin.set_fact:
+    vs_policies_map: >-
+      {{
+        vs_policies_map | default({})
+        | combine({item[0].name: (vs_policies_map | default({})).get(item[0].name, []) + [policy_target_path]})
+      }}
+  loop: "{{ migrate_vs | subelements('policies', skip_missing=True) }}"
+  loop_control:
+    label: "{{ item[0].name }}/{{ item[1] }}"
+  vars:
+    # item[1] is the policy's full_path string directly (e.g.
+    # "/Common/asm_auto_l7_policy__HTTP-Testing-VIP") - not a {name,
+    # partition} dict. Cross-reference migrate_policies by basename to
+    # derive the cloned policy's folder, the same way profile_folder does
+    # above for profiles.
+    policy_name: "{{ item[1] | basename }}"
+    matched_policy: "{{ migrate_policies | selectattr('name', 'equalto', policy_name) | list | first | default({}) }}"
+    policy_folder: >-
+      {{
+        (matched_policy.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (matched_policy.full_path is defined and matched_policy.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    policy_target_path: >-
+      {{
+        ('/' + dest_partition + (('/' + policy_folder) if policy_folder else '') + '/' + policy_name) if policy_name in migrated_custom_policy_names
+        else item[1]
+      }}
+
+# Recreating the VS later would otherwise rely on bigip_virtual_server's
+# auto-created default virtual-address, losing any non-default arp/icmp-echo/
+# route-advertisement/traffic-group settings - this captures the originals
+# so tasks/v2/07_cutover_virtual_servers.yml can recreate them explicitly.
+- name: Select the virtual-address objects backing the migrated VIPs
+  ansible.builtin.set_fact:
+    migrate_virtual_addresses: >-
+      {{
+        src_va_facts.virtual_addresses | default([])
+        | selectattr('address', 'in', (migrate_vs | map(attribute='destination_address') | list))
+        | list
+      }}
+
+# Folder support: BIG-IP folders are per-object, not a single global
+# setting (a VS/pool/policy can live in a sub-folder while its
+# virtual-address and nodes stay flat at the partition root, as seen in
+# real-world migrations) - so folders are derived from each object's own
+# discovered full_path rather than a single configured folder name. There
+# is no bigip_folder module in this collection (bigip_partition only
+# manages top-level partitions), so folder creation uses tmsh via
+# bigip_command. The actual set of folders needed is only known now, after
+# discovery has resolved what actually needs to move.
+- name: Derive the set of folders needed in destination partition
+  ansible.builtin.set_fact:
+    dest_folders_needed: >-
+      {{
+        (
+          (migrate_vs | map(attribute='full_path') | list)
+          + (migrate_pools | map(attribute='full_path') | list)
+          + (migrate_policies | map(attribute='full_path') | list)
+        )
+        | select('match', '^/[^/]+/[^/]+/[^/]+')
+        | map('regex_replace', '^/[^/]+/(.+)/[^/]+$', '\1')
+        | list | unique
+      }}
+  when: preserve_folders | default(true) | bool
+
+# bigip_command doesn't fail (and doesn't populate .msg) when tmsh returns
+# an informational error like "folder already exists" - that text only
+# shows up in stdout, with failed=false. Must check stdout, not .msg, or
+# this never recognizes "already exists" and reports changed on every run.
+- name: Create needed folders in destination partition
+  f5networks.f5_modules.bigip_command:
+    commands:
+      - "create sys folder /{{ dest_partition }}/{{ item }}"
+    provider: "{{ provider }}"
+  loop: "{{ dest_folders_needed | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  register: folder_create_result
+  failed_when: >-
+    folder_create_result.failed and
+    'already exists' not in (folder_create_result.stdout | default([]) | join(' '))
+  changed_when: "'already exists' not in (folder_create_result.stdout | default([]) | join(' '))"
 
 - name: Show discovery summary
   ansible.builtin.debug:
@@ -201,3 +401,5 @@
       nodes_to_move_during_cutover: "{{ migrate_node_paths }}"
       monitors: "{{ (migrate_http_monitors + migrate_https_monitors + migrate_tcp_monitors + migrate_tcp_half_open_monitors + migrate_gateway_icmp_monitors + migrate_icmp_monitors) | map(attribute='name') | list }}"
       custom_profiles: "{{ (migrate_client_ssl_profiles + migrate_server_ssl_profiles + migrate_http_profiles + migrate_tcp_profiles + migrate_udp_profiles + migrate_oneconnect_profiles) | map(attribute='name') | list }}"
+      custom_policies: "{{ migrate_policies | map(attribute='name') | list }}"
+      virtual_addresses: "{{ migrate_virtual_addresses | map(attribute='full_path') | list }}"

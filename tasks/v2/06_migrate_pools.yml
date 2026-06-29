@@ -1,0 +1,46 @@
+---
+- name: Recreate pools in destination partition
+  f5networks.f5_modules.bigip_pool:
+    name: "{{ item_name_with_folder }}"
+    partition: "{{ dest_partition }}"
+    lb_method: "{{ item.lb_method | default(omit) }}"
+    description: "{{ item.description | default(omit) }}"
+    slow_ramp_time: "{{ item.slow_ramp_time | default(omit) }}"
+    reselect_tries: "{{ item.reselect_tries | default(omit) }}"
+    service_down_action: "{{ item.service_down_action | default(omit) }}"
+    # min-active-members (bigip_pool's actual param name is
+    # priority_group_activation, aliased minimum_active_members).
+    priority_group_activation: "{{ item.minimum_active_members | default(omit) }}"
+    # pool_monitor_info (built in tasks/v2/02_discover.yml) parses the raw
+    # tmsh-style monitor string bigip_device_info returns for pools,
+    # including the "min N of {...}" compound (m_of_n/quorum) form - a plain
+    # list of monitor names was never sufficient for that case.
+    monitor_type: "{{ pool_monitor_info[item.name].monitor_type | default(omit) }}"
+    quorum: "{{ pool_monitor_info[item.name].quorum | default(omit) if pool_monitor_info[item.name].monitor_type | default('') == 'm_of_n' else omit }}"
+    monitors: "{{ pool_monitor_info[item.name].monitor_paths | map('basename') | map('extract', monitor_path_map) | list if (pool_monitor_info[item.name].monitor_paths | default([]) | length > 0) else omit }}"
+    state: present
+    provider: "{{ provider }}"
+  loop: "{{ migrate_pools }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    # Folder-aware: a pool that lived in a sub-folder of source_partition is
+    # recreated in the same-named sub-folder of dest_partition (a pool can
+    # be folder-nested even when its members/nodes - migrated separately in
+    # tasks/v2/07_cutover_virtual_servers.yml - stay flat).
+    item_folder: >-
+      {{
+        (item.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    item_name_with_folder: "{{ (item_folder + '/' + item.name) if item_folder else item.name }}"
+
+# Pool members are NOT created here. A pool member can only reference a node
+# in /Common or its own partition, and the nodes backing these members
+# currently live in source_partition (or an earlier hop's partition) - not
+# dest_partition. Moving a node (its address is unique device-wide, so it
+# can't simply be duplicated) is therefore a brief, real interruption like
+# the VS cutover itself, so pool members are created in
+# tasks/07_cutover_virtual_servers.yml, gated behind cutover_virtual_servers,
+# right after the backing nodes are moved into dest_partition.

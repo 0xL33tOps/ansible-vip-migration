@@ -1,0 +1,218 @@
+---
+# Only runs when cutover_virtual_servers=true. By this point, the (memberless)
+# pools, monitors and custom profiles already exist in dest_partition (steps
+# 03/05/06) - that part is non-destructive and safe to repeat/retry. Pool
+# members and their backing nodes, and the virtual server itself, cannot be
+# staged the same way: node addresses and VS destination IPs are both unique
+# device-wide, so neither can exist in both partitions at once. This step is
+# therefore a real cutover - briefly remove members/nodes/VS from
+# source_partition, then immediately recreate them in dest_partition.
+
+# bigip_pool_member resolves the pool path with fq_name() (which ignores
+# "partition" once a value already starts with "/", so passing it fully
+# qualified here keeps the pool lookup correct), but resolves the *member*
+# path with transform_name(partition, name-or-address) - which always
+# prefixes "partition" verbatim. The real member ID on the device is
+# prefixed with the node's own partition (e.g. /Common), not the pool's, so
+# "partition" here must be the node's partition - not source_partition -
+# or the module silently matches nothing and leaves the member (and its
+# node) in place. "name" must be the node's own bare name, not its
+# address - those only coincide when a node happens to be named after its
+# IP; a custom-named node (e.g. "Test-node" with address "1.1.1.1", or
+# MANUAL_CHANGE's "nodes.lnx3352vm_10.48.208.194") has a member resource ID
+# based on its name, not its address, so address-only matching silently
+# finds nothing for those.
+- name: Remove pool members referencing the migrated nodes from the source partition
+  f5networks.f5_modules.bigip_pool_member:
+    pool: "/{{ source_partition }}{{ ('/' + pool_folder) if pool_folder else '' }}/{{ item[0].name }}"
+    partition: "{{ node_partition }}"
+    name: "{{ node_name }}"
+    address: "{{ item[1].address }}"
+    port: "{{ item[1].full_path.split(':')[-1] }}"
+    state: absent
+    provider: "{{ provider }}"
+  loop: "{{ migrate_pools | subelements('members', skip_missing=True) }}"
+  loop_control:
+    label: "{{ item[0].name }}/{{ item[1].name }}"
+  vars:
+    node_full_path: "{{ item[1].full_path | regex_replace(':[0-9]+$', '') }}"
+    node_partition: "{{ node_full_path.split('/')[1] }}"
+    node_name: "{{ node_full_path.split('/')[-1] }}"
+    # Folder-aware: the pool itself (item[0]) may be folder-nested even
+    # though its members/nodes stay flat - derive from the pool's own
+    # (source-side) full_path.
+    pool_folder: >-
+      {{
+        (item[0].full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item[0].full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+
+- name: Remove the now-unreferenced nodes from their current partition
+  f5networks.f5_modules.bigip_node:
+    name: "{{ item.name }}"
+    partition: "{{ item.partition }}"
+    state: absent
+    provider: "{{ provider }}"
+  loop: "{{ migrate_nodes }}"
+  loop_control:
+    label: "{{ item.partition }}/{{ item.name }}"
+
+- name: Recreate the nodes in the destination partition
+  f5networks.f5_modules.bigip_node:
+    name: "{{ item.name }}"
+    partition: "{{ node_target_partition }}"
+    address: "{{ item.address }}"
+    state: present
+    provider: "{{ provider }}"
+  loop: "{{ migrate_nodes }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# "partition" here controls the *member's reference to its node* (see the
+# comment on the member-removal task above), not the pool - it must track
+# node_target_partition (wherever the node actually landed), which may
+# differ from dest_partition (e.g. when node_target_partition is "Common").
+- name: Recreate pool members in destination partition
+  f5networks.f5_modules.bigip_pool_member:
+    pool: "/{{ dest_partition }}{{ ('/' + pool_folder) if pool_folder else '' }}/{{ item[0].name }}"
+    partition: "{{ node_target_partition }}"
+    name: "{{ node_name }}"
+    address: "{{ item[1].address }}"
+    port: "{{ item[1].full_path.split(':')[-1] }}"
+    description: "{{ item[1].description | default(omit) }}"
+    connection_limit: "{{ item[1].connection_limit | default(omit) }}"
+    ratio: "{{ item[1].ratio | default(omit) }}"
+    priority_group: "{{ item[1].priority_group | default(omit) }}"
+    monitors: "{{ item[1].monitors | default([]) | map('basename') | map('extract', monitor_path_map) | list if (item[1].monitors | default([]) | length > 0) else omit }}"
+    state: present
+    provider: "{{ provider }}"
+  loop: "{{ migrate_pools | subelements('members', skip_missing=True) }}"
+  loop_control:
+    label: "{{ item[0].name }}/{{ item[1].name }}"
+  vars:
+    node_full_path: "{{ item[1].full_path | regex_replace(':[0-9]+$', '') }}"
+    node_name: "{{ node_full_path.split('/')[-1] }}"
+    # Folder-aware: the pool itself (item[0]) may be folder-nested even
+    # though its members/nodes stay flat - derive from the pool's own
+    # (source-side) full_path, which is still valid here since this task
+    # runs before any folder structure changes on either side.
+    pool_folder: >-
+      {{
+        (item[0].full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item[0].full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+
+- name: Remove the virtual server from the source partition
+  f5networks.f5_modules.bigip_virtual_server:
+    name: "{{ item_name_with_folder }}"
+    partition: "{{ source_partition }}"
+    state: absent
+    provider: "{{ provider }}"
+  loop: "{{ migrate_vs }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    # Folder-aware: full_path here is still the VS's source-side location.
+    item_folder: >-
+      {{
+        (item.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    item_name_with_folder: "{{ (item_folder + '/' + item.name) if item_folder else item.name }}"
+
+- name: Remove any virtual-address object left behind in the source partition
+  f5networks.f5_modules.bigip_virtual_address:
+    address: "{{ item.destination_address }}"
+    partition: "{{ source_partition }}"
+    state: absent
+    provider: "{{ provider }}"
+  loop: "{{ migrate_vs }}"
+  loop_control:
+    label: "{{ item.destination_address }}"
+  ignore_errors: true # may not exist, or may still be in use by another VS sharing the address
+
+# Recreated explicitly (rather than relying on bigip_virtual_server's
+# auto-created default) so non-default arp/icmp-echo/route-advertisement/
+# traffic-group settings carry over instead of silently reverting to
+# defaults. Known limitation: bigip_device_info collapses icmp_echo/
+# route_advertisement values other than enabled/disabled (e.g. "always",
+# "selective", "any", "all") to None on discovery - those can't be
+# round-tripped and must be verified/corrected manually post-migration.
+- name: Recreate virtual-address objects with their original attributes in destination partition
+  f5networks.f5_modules.bigip_virtual_address:
+    address: "{{ item.address }}"
+    partition: "{{ dest_partition }}"
+    netmask: "{{ item.netmask | default(omit) }}"
+    arp: "{{ (item.arp_enabled == 'yes') if item.arp_enabled is defined and item.arp_enabled is not none else omit }}"
+    icmp_echo: "{{ ('enabled' if item.icmp_echo == 'yes' else 'disabled') if item.icmp_echo is defined and item.icmp_echo is not none else omit }}"
+    route_advertisement: "{{ ('enabled' if item.route_advertisement == 'yes' else 'disabled') if item.route_advertisement is defined and item.route_advertisement is not none else omit }}"
+    traffic_group: "{{ item.traffic_group | default(omit) }}"
+    state: present
+    provider: "{{ provider }}"
+  loop: "{{ migrate_virtual_addresses }}"
+  loop_control:
+    label: "{{ item.address }}"
+
+- name: Create the virtual server in the destination partition
+  f5networks.f5_modules.bigip_virtual_server:
+    name: "{{ item_name_with_folder }}"
+    partition: "{{ dest_partition }}"
+    description: "{{ item.description | default(omit) }}"
+    destination: "{{ item.destination_address }}"
+    port: "{{ item.destination_port | default(omit) }}"
+    type: "{{ item.type | default(omit) }}"
+    source: "{{ item.source_address | default(omit) }}"
+    pool: "{{ ('/' + dest_partition + (('/' + pool_folder) if pool_folder else '') + '/' + (item.default_pool | basename)) if (item.default_pool | default('')) else omit }}"
+    snat: >-
+      {{
+        'automap' if item.snat_type | default('') == 'automap'
+        else 'none' if item.snat_type | default('') == 'none'
+        else item.snat_pool if item.snat_pool is defined
+        else omit
+      }}
+    irules: "{{ item.irules | default([]) | map('regex_replace', '^/' + source_partition + '/', '/' + dest_partition + '/') | list if (item.irules | default([]) | length > 0) else omit }}"
+    default_persistence_profile: "{{ item.persistence_profile | default(omit) }}"
+    fallback_persistence_profile: "{{ item.fallback_persistence_profile | default(omit) }}"
+    profiles: "{{ (vs_profiles_map | default({})).get(item.name, []) }}"
+    # vs_policies_map (built in tasks/v2/02_discover.yml via a
+    # subelements('policies') loop) is left fully undefined - not {} - when
+    # a VS has zero attached policies, since the loop then has zero
+    # iterations and the set_fact task never runs at all. | default({})
+    # guards against that.
+    policies: >-
+      {{
+        (vs_policies_map | default({})).get(item.name, [])
+        if ((vs_policies_map | default({})).get(item.name, []) | length > 0)
+        else omit
+      }}
+    ip_protocol: "{{ item.protocol | default(omit) }}"
+    address_translation: "{{ (item.translate_address == 'yes') if item.translate_address is defined and item.translate_address is not none else omit }}"
+    port_translation: "{{ (item.translate_port == 'yes') if item.translate_port is defined and item.translate_port is not none else omit }}"
+    security_log_profiles: "{{ item.security_log_profiles | default([]) if (item.security_log_profiles | default([]) | length > 0) else omit }}"
+    state: "{{ 'enabled' if item.enabled | default(true) else 'disabled' }}"
+    provider: "{{ provider }}"
+  loop: "{{ migrate_vs }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    # Folder-aware: full_path here is still the VS's source-side location -
+    # the destination uses the same folder name.
+    item_folder: >-
+      {{
+        (item.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    item_name_with_folder: "{{ (item_folder + '/' + item.name) if item_folder else item.name }}"
+    # The pool's folder is derived from item.default_pool's own (source-side)
+    # full_path rather than re-deriving from migrate_pools, since
+    # default_pool already carries that full_path directly.
+    pool_folder: >-
+      {{
+        (item.default_pool | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.default_pool | default('') | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}

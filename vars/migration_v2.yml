@@ -1,0 +1,89 @@
+# Migration parameters. Edit this file directly for each migration run -
+# see README.md "How to run it" for the exact commands per phase.
+source_partition: Sample_01
+dest_partition: move-partition
+
+# Full list of virtual server (VIP) names, relative to source_partition,
+# that should be migrated along with their pools/members/monitors/profiles
+# (nodes are reused from source_partition rather than duplicated - BIG-IP
+# requires node addresses to be unique device-wide, not per-partition).
+vip_names:
+  - Test-VS
+  - VS-Complex
+  - VS-Policy
+
+# Staging pools/members/monitors/profiles in dest_partition is
+# non-destructive and safe to re-run. The virtual server itself can't be
+# staged the same way: its destination IP is also unique device-wide, so it
+# can't exist in both partitions at once. Set this to true once you've
+# validated the staged objects and are ready for the brief
+# remove-then-recreate cutover of the VS itself.
+cutover_virtual_servers: true
+
+# After the cutover above has run, set this to true to also delete the
+# now-unused pools/members/monitors/profiles left behind in
+# source_partition. Has no effect unless cutover_virtual_servers is also
+# true. Defaults to false so migrations are non-destructive until
+# explicitly confirmed.
+remove_source_after_migration: true
+
+# Built-in/system profiles and monitors are shared platform objects that live
+# in /Common and are meant to be referenced, not cloned per-partition. Any
+# profile or monitor parent whose name appears here is left pointing at
+# /Common instead of being duplicated into dest_partition.
+default_profile_names:
+  - f5-tcp-lan
+  - f5-tcp-wan
+  - f5-tcp-lan-optimized
+  - f5-tcp-wan-optimized
+  - f5-tcp
+  - f5-udp
+  - f5-http
+  - f5-http-explicit
+  - f5-http-transparent
+  - f5-fastL4
+  - f5-fastl4
+  - f5-clientssl
+  - f5-serverssl
+  - tcp
+  - tcp-lan-optimized
+  - tcp-wan-optimized
+  - udp
+  - http
+  - http-explicit
+  - http-transparent
+  - fastL4
+  - fastl4
+  - clientssl
+  - serverssl
+  - oneconnect
+  - http2
+  - httpcompression
+  - websecurity
+
+default_monitor_parents:
+  - http
+  - https
+  - tcp
+  - tcp_half_open
+  - icmp
+  - gateway_icmp
+  - udp
+
+# v2-only settings (not present in vars/migration.yml):
+
+# Where moved nodes get recreated during cutover. Defaults to
+# dest_partition (matches the original playbook's behavior). Set to
+# "Common" to instead recreate moved nodes in /Common (shared,
+# partition-independent) - useful if the same physical servers will be
+# migrated again later and you don't want to re-move the node each time.
+# This does not affect already-staged pools/profiles/policies, only where
+# the node objects themselves land during the cutover step.
+node_target_partition: "{{ dest_partition }}"
+
+# When true (default), objects that live inside a sub-folder of
+# source_partition (e.g. /partition/some_folder/SRV_x) are recreated inside
+# a same-named sub-folder of dest_partition. When false, all objects are
+# flattened to the root of dest_partition regardless of their source
+# folder.
+preserve_folders: true

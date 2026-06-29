@@ -1,0 +1,54 @@
+---
+# v2: same two-phase design as playbooks/migrate_vips.yml, extended with
+# LTM policy migration, pool monitor quorum/min_active_members,
+# virtual-address attribute carry-over, additional VS-level fields, and a
+# configurable node landing partition. See README.md's "v2" section for
+# what's different and its known limitations.
+- name: Migrate VIPs and their underlying objects between F5 BIG-IP partitions (v2)
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../vars/main.yml
+    - ../vars/migration_v2.yml
+  tasks:
+    - name: Create destination partition
+      ansible.builtin.import_tasks: ../tasks/v2/01_create_partition.yml
+
+    - name: Discover source objects to migrate
+      ansible.builtin.import_tasks: ../tasks/v2/02_discover.yml
+
+    - name: Migrate monitors
+      ansible.builtin.import_tasks: ../tasks/v2/03_migrate_monitors.yml
+
+    - name: Migrate LTM policies
+      ansible.builtin.import_tasks: ../tasks/v2/04_migrate_policies.yml
+
+    - name: Migrate profiles
+      ansible.builtin.import_tasks: ../tasks/v2/05_migrate_profiles.yml
+
+    - name: Migrate pools and pool members
+      ansible.builtin.import_tasks: ../tasks/v2/06_migrate_pools.yml
+
+    # Everything above is non-destructive and safe to re-run: (memberless)
+    # pools, monitors, custom profiles and LTM policies now exist in
+    # dest_partition alongside the still-live original VS. Pool members,
+    # their backing nodes, and the VS's destination IP can't exist in both
+    # partitions at once, though, so none of those can be staged the same
+    # way - they require an explicit cutover.
+    - name: Cutover virtual servers (move pool members/nodes, remove VS from source, recreate in destination)
+      ansible.builtin.import_tasks: ../tasks/v2/07_cutover_virtual_servers.yml
+      when: cutover_virtual_servers | bool
+
+    - name: Skip cutover
+      ansible.builtin.debug:
+        msg: >-
+          Pools (without members)/monitors/profiles/policies were staged in
+          {{ dest_partition }}, but cutover_virtual_servers is false, so pool
+          members, nodes and the VS itself were left untouched in
+          {{ source_partition }}. Re-run with -e cutover_virtual_servers=true
+          once you're ready for the brief cutover.
+      when: not (cutover_virtual_servers | bool)
+
+    - name: Remove remaining originals from the source partition
+      ansible.builtin.import_tasks: ../tasks/v2/08_cleanup_source.yml
+      when: remove_source_after_migration | bool and cutover_virtual_servers | bool

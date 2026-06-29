@@ -1,0 +1,300 @@
+---
+# Only runs when remove_source_after_migration=true AND
+# cutover_virtual_servers=true. By this point the VS, pool members and their
+# backing nodes are already gone from source_partition - see
+# tasks/07_cutover_virtual_servers.yml. Deletes the remaining originals
+# (the now-empty pools, custom monitors, custom profiles) from
+# source_partition now that the copies in dest_partition exist and are live.
+
+- name: Remove pools from source partition
+  f5networks.f5_modules.bigip_pool:
+    name: "{{ item_name_with_folder }}"
+    partition: "{{ source_partition }}"
+    state: absent
+    provider: "{{ provider }}"
+  loop: "{{ migrate_pools }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    # Folder-aware: delete from the same sub-folder the object was
+    # originally observed in (full_path here is still source_partition's).
+    item_folder: >-
+      {{
+        (item.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    item_name_with_folder: "{{ (item_folder + '/' + item.name) if item_folder else item.name }}"
+
+- name: Remove custom LTM policies from source partition
+  f5networks.f5_modules.bigip_policy:
+    name: "{{ item_name_with_folder }}"
+    partition: "{{ source_partition }}"
+    state: absent
+    provider: "{{ provider }}"
+  loop: "{{ migrate_policies }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    # Folder-aware: delete from the same sub-folder the object was
+    # originally observed in (full_path here is still source_partition's).
+    item_folder: >-
+      {{
+        (item.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    item_name_with_folder: "{{ (item_folder + '/' + item.name) if item_folder else item.name }}"
+  ignore_errors: true # policy may still be referenced elsewhere in source_partition
+
+- name: Remove HTTP monitors from source partition
+  f5networks.f5_modules.bigip_monitor_http:
+    name: "{{ item_name_with_folder }}"
+    partition: "{{ source_partition }}"
+    state: absent
+    provider: "{{ provider }}"
+  loop: "{{ migrate_http_monitors }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    # Folder-aware: delete from the same sub-folder the object was
+    # originally observed in (full_path here is still source_partition's).
+    item_folder: >-
+      {{
+        (item.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    item_name_with_folder: "{{ (item_folder + '/' + item.name) if item_folder else item.name }}"
+  ignore_errors: true # monitor may still be referenced elsewhere in source_partition
+
+- name: Remove HTTPS monitors from source partition
+  f5networks.f5_modules.bigip_monitor_https:
+    name: "{{ item_name_with_folder }}"
+    partition: "{{ source_partition }}"
+    state: absent
+    provider: "{{ provider }}"
+  loop: "{{ migrate_https_monitors }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    # Folder-aware: delete from the same sub-folder the object was
+    # originally observed in (full_path here is still source_partition's).
+    item_folder: >-
+      {{
+        (item.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    item_name_with_folder: "{{ (item_folder + '/' + item.name) if item_folder else item.name }}"
+  ignore_errors: true
+
+- name: Remove TCP monitors from source partition
+  f5networks.f5_modules.bigip_monitor_tcp:
+    name: "{{ item_name_with_folder }}"
+    partition: "{{ source_partition }}"
+    state: absent
+    provider: "{{ provider }}"
+  loop: "{{ migrate_tcp_monitors }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    # Folder-aware: delete from the same sub-folder the object was
+    # originally observed in (full_path here is still source_partition's).
+    item_folder: >-
+      {{
+        (item.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    item_name_with_folder: "{{ (item_folder + '/' + item.name) if item_folder else item.name }}"
+  ignore_errors: true
+
+- name: Remove TCP half-open monitors from source partition
+  f5networks.f5_modules.bigip_monitor_tcp_half_open:
+    name: "{{ item_name_with_folder }}"
+    partition: "{{ source_partition }}"
+    state: absent
+    provider: "{{ provider }}"
+  loop: "{{ migrate_tcp_half_open_monitors }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    # Folder-aware: delete from the same sub-folder the object was
+    # originally observed in (full_path here is still source_partition's).
+    item_folder: >-
+      {{
+        (item.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    item_name_with_folder: "{{ (item_folder + '/' + item.name) if item_folder else item.name }}"
+  ignore_errors: true
+
+- name: Remove gateway ICMP monitors from source partition
+  f5networks.f5_modules.bigip_monitor_gateway_icmp:
+    name: "{{ item_name_with_folder }}"
+    partition: "{{ source_partition }}"
+    state: absent
+    provider: "{{ provider }}"
+  loop: "{{ migrate_gateway_icmp_monitors }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    # Folder-aware: delete from the same sub-folder the object was
+    # originally observed in (full_path here is still source_partition's).
+    item_folder: >-
+      {{
+        (item.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    item_name_with_folder: "{{ (item_folder + '/' + item.name) if item_folder else item.name }}"
+  ignore_errors: true
+
+- name: Remove ICMP monitors from source partition
+  f5networks.f5_modules.bigip_monitor_icmp:
+    name: "{{ item_name_with_folder }}"
+    partition: "{{ source_partition }}"
+    state: absent
+    provider: "{{ provider }}"
+  loop: "{{ migrate_icmp_monitors }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    # Folder-aware: delete from the same sub-folder the object was
+    # originally observed in (full_path here is still source_partition's).
+    item_folder: >-
+      {{
+        (item.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    item_name_with_folder: "{{ (item_folder + '/' + item.name) if item_folder else item.name }}"
+  ignore_errors: true
+
+- name: Remove Client SSL profiles from source partition
+  f5networks.f5_modules.bigip_profile_client_ssl:
+    name: "{{ item_name_with_folder }}"
+    partition: "{{ source_partition }}"
+    state: absent
+    provider: "{{ provider }}"
+  loop: "{{ migrate_client_ssl_profiles }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    # Folder-aware: delete from the same sub-folder the object was
+    # originally observed in (full_path here is still source_partition's).
+    item_folder: >-
+      {{
+        (item.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    item_name_with_folder: "{{ (item_folder + '/' + item.name) if item_folder else item.name }}"
+  ignore_errors: true # profile may still be referenced elsewhere in source_partition
+
+- name: Remove Server SSL profiles from source partition
+  f5networks.f5_modules.bigip_profile_server_ssl:
+    name: "{{ item_name_with_folder }}"
+    partition: "{{ source_partition }}"
+    state: absent
+    provider: "{{ provider }}"
+  loop: "{{ migrate_server_ssl_profiles }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    # Folder-aware: delete from the same sub-folder the object was
+    # originally observed in (full_path here is still source_partition's).
+    item_folder: >-
+      {{
+        (item.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    item_name_with_folder: "{{ (item_folder + '/' + item.name) if item_folder else item.name }}"
+  ignore_errors: true
+
+- name: Remove HTTP profiles from source partition
+  f5networks.f5_modules.bigip_profile_http:
+    name: "{{ item_name_with_folder }}"
+    partition: "{{ source_partition }}"
+    state: absent
+    provider: "{{ provider }}"
+  loop: "{{ migrate_http_profiles }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    # Folder-aware: delete from the same sub-folder the object was
+    # originally observed in (full_path here is still source_partition's).
+    item_folder: >-
+      {{
+        (item.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    item_name_with_folder: "{{ (item_folder + '/' + item.name) if item_folder else item.name }}"
+  ignore_errors: true
+
+- name: Remove TCP profiles from source partition
+  f5networks.f5_modules.bigip_profile_tcp:
+    name: "{{ item_name_with_folder }}"
+    partition: "{{ source_partition }}"
+    state: absent
+    provider: "{{ provider }}"
+  loop: "{{ migrate_tcp_profiles }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    # Folder-aware: delete from the same sub-folder the object was
+    # originally observed in (full_path here is still source_partition's).
+    item_folder: >-
+      {{
+        (item.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    item_name_with_folder: "{{ (item_folder + '/' + item.name) if item_folder else item.name }}"
+  ignore_errors: true
+
+- name: Remove UDP profiles from source partition
+  f5networks.f5_modules.bigip_profile_udp:
+    name: "{{ item_name_with_folder }}"
+    partition: "{{ source_partition }}"
+    state: absent
+    provider: "{{ provider }}"
+  loop: "{{ migrate_udp_profiles }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    # Folder-aware: delete from the same sub-folder the object was
+    # originally observed in (full_path here is still source_partition's).
+    item_folder: >-
+      {{
+        (item.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    item_name_with_folder: "{{ (item_folder + '/' + item.name) if item_folder else item.name }}"
+  ignore_errors: true
+
+- name: Remove OneConnect profiles from source partition
+  f5networks.f5_modules.bigip_profile_oneconnect:
+    name: "{{ item_name_with_folder }}"
+    partition: "{{ source_partition }}"
+    state: absent
+    provider: "{{ provider }}"
+  loop: "{{ migrate_oneconnect_profiles }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    # Folder-aware: delete from the same sub-folder the object was
+    # originally observed in (full_path here is still source_partition's).
+    item_folder: >-
+      {{
+        (item.full_path | regex_replace('^/[^/]+/(.+)/[^/]+$', '\1'))
+        if (item.full_path | regex_findall('/') | length >= 3 and (preserve_folders | default(true) | bool))
+        else ''
+      }}
+    item_name_with_folder: "{{ (item_folder + '/' + item.name) if item_folder else item.name }}"
+  ignore_errors: true

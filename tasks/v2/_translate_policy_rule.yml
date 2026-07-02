@@ -22,7 +22,7 @@
     translated_action: >-
       {{
         {'type': 'redirect', 'location': action.location}
-        if (action.redirect | default(false) | bool and action.httpReply | default(false) | bool and action.location is defined)
+        if (action.redirect | default(false) | bool and (action.httpReply | default(false) | bool or action.request | default(false) | bool) and action.location is defined)
         else (undef(hint="Unrecognized policy rule action shape: " + (action | string) + " - extend tasks/v2/_translate_policy_rule.yml to handle it."))
       }}
 
